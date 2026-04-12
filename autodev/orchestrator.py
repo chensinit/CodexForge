@@ -157,6 +157,7 @@ class AutoDevOrchestrator:
             next_state.plan_initialized = True
             next_state.plan_summary = state.plan_summary
             next_state.progress_summary = decision.progress_update
+            next_state.total_turns = state.total_turns
             next_state.last_codex_summary = self._summarize_codex_output(codex_result.stdout)
             next_state.last_codex_stdout = codex_result.stdout
             next_state.last_codex_stderr = codex_result.stderr
@@ -203,7 +204,7 @@ class AutoDevOrchestrator:
         while True:
             result = self.run_turn()
             history.append(result)
-            if result["event"] in {"completed", "session_wrapped", "max_turns_reached"}:
+            if result["event"] in {"completed", "max_turns_reached"}:
                 return history
 
     def _load_or_create_state(self) -> SessionState:
