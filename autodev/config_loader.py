@@ -25,7 +25,7 @@ def load_loop_config(
         max_total_turns=common["loop"]["max_total_turns"],
         codex_command=common["codex"]["command"],
         openai_model=common["openai"]["model"],
-        openai_api_key=common["openai"]["api_key"],
+        openai_api_key=_resolve_openai_api_key(common["openai"]),
         requirement=task["requirement"],
         short_requirement=task["short_requirement"],
         session_bootstrap_prompt=(prompt_dir / "session_bootstrap_prompt.md").read_text(
@@ -40,6 +40,11 @@ def load_loop_config(
         step_review_prompt=(prompt_dir / "step_review_prompt.md").read_text(
             encoding="utf-8"
         ),
+        gemini_models=common["gemini"]["models"],
+        gemini_api_key=str(common["gemini"].get("api_key", "")).strip(),
+        qwen_models=common["qwen"]["models"],
+        qwen_api_key=str(common["qwen"].get("api_key", "")).strip(),
+        qwen_base_url=str(common["qwen"].get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")).strip(),
     )
 
 
@@ -48,3 +53,8 @@ def render_prompt(template: str, values: dict[str, object]) -> str:
     for key, value in values.items():
         rendered = rendered.replace(f"{{{key}}}", str(value))
     return rendered
+
+
+def _resolve_openai_api_key(openai_config: dict[str, object]) -> str:
+    configured_api_key = str(openai_config.get("api_key", "")).strip()
+    return configured_api_key

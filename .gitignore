@@ -1,1 +1,4 @@
 config/common.json
+__pycache__/
+*.log
+config/task.json

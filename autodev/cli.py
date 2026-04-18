@@ -7,6 +7,8 @@ from pathlib import Path
 
 from autodev.config_loader import load_loop_config
 from autodev.codex_runner import CodexRunner
+from autodev.gemini_runner import GeminiRunner
+from autodev.qwen_runner import QwenRunner
 from autodev.controller import OpenAIController
 from autodev.orchestrator import AutoDevOrchestrator
 
@@ -39,28 +41,51 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    config = load_loop_config(
-        common_config_path=Path(args.common_config).resolve(),
-        task_config_path=Path(args.task_config).resolve(),
-        prompt_dir=Path(args.prompt_dir).resolve(),
-    )
-    orchestrator = AutoDevOrchestrator(
-        config=config,
-        codex_runner=CodexRunner(config.codex_command, event_logger=_log_event),
-        controller=OpenAIController(
-            model=config.openai_model,
-            api_key=config.openai_api_key,
-            review_prompt_template=config.step_review_prompt,
-        ),
-        event_logger=_log_event,
-    )
-    if args.one_turn:
-        results = [orchestrator.run_turn()]
-    else:
-        results = orchestrator.run_until_stop()
-    print(json.dumps([_serialize_result(result) for result in results], ensure_ascii=False))
-    return 0
+    try:
+        args = build_parser().parse_args()
+        config = load_loop_config(
+            common_config_path=Path(args.common_config).resolve(),
+            task_config_path=Path(args.task_config).resolve(),
+            prompt_dir=Path(args.prompt_dir).resolve(),
+        )
+
+        print("=" * 80, file=sys.stderr)
+        print(f"Workspace Path: {config.workspace}", file=sys.stderr)
+        print("Starting task with the following requirement:", file=sys.stderr)
+        print("-" * 80, file=sys.stderr)
+        print(config.requirement, file=sys.stderr)
+        print("=" * 80, file=sys.stderr, flush=True)
+
+        orchestrator = AutoDevOrchestrator(
+            config=config,
+            codex_runner=CodexRunner(config.codex_command, event_logger=_log_event),
+            gemini_runner=GeminiRunner(
+                api_key=config.gemini_api_key,
+                models=config.gemini_models,
+                event_logger=_log_event
+            ),
+            qwen_runner=QwenRunner(
+                api_key=config.qwen_api_key,
+                models=config.qwen_models,
+                base_url=config.qwen_base_url,
+                event_logger=_log_event
+            ),
+            controller=OpenAIController(
+                model=config.openai_model,
+                api_key=config.openai_api_key,
+                review_prompt_template=config.step_review_prompt,
+            ),
+            event_logger=_log_event,
+        )
+        if args.one_turn:
+            results = [orchestrator.run_turn()]
+        else:
+            results = orchestrator.run_until_stop()
+        print(json.dumps([_serialize_result(result) for result in results], ensure_ascii=False))
+        return 0
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 def _serialize_result(result: dict) -> dict:

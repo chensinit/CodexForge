@@ -11,6 +11,9 @@ Rules:
 - Save the plan as a markdown document in the project.
 - If a progress document already exists, update that same document instead of making a new one.
 - In your reply, briefly say what document you created and what comes next.
+- If the entire project or task is already complete and no further action is needed, include the token `[[DONE]]` in your reply.
+- Do not ask for development direction; instead, use your own judgment to determine the best approach and proceed.
+- Avoid testing whenever possible, and absolutely do not perform any tests that involve calling external APIs.
 
 Write a markdown document in this format:
 

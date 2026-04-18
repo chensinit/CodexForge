@@ -22,6 +22,11 @@ class LoopConfig:
     initial_planning_prompt: str
     session_wrapup_prompt: str
     step_review_prompt: str
+    gemini_models: list[str]
+    gemini_api_key: str
+    qwen_models: list[str]
+    qwen_api_key: str
+    qwen_base_url: str
 
 
 @dataclass

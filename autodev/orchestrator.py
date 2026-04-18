@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from autodev.config_loader import render_prompt
 from autodev.models import CodexResult, ControllerDecision, LoopConfig, SessionState
 
 
 class AutoDevOrchestrator:
-    def __init__(self, *, config: LoopConfig, codex_runner, controller, event_logger=None):
+    def __init__(self, *, config: LoopConfig, codex_runner, gemini_runner, qwen_runner, controller, event_logger=None):
         self.config = config
         self.codex_runner = codex_runner
+        self.gemini_runner = gemini_runner
+        self.qwen_runner = qwen_runner
         self.controller = controller
         self.event_logger = event_logger
+        self._state = None
+        self._use_fallback_directly = False
 
     def run_turn(self):
         state = self._load_or_create_state()
@@ -201,15 +206,36 @@ class AutoDevOrchestrator:
 
     def run_until_stop(self):
         history = []
+        start_time = time.time()
+        max_runtime_seconds = 2 * 60 * 60  # 2 hours
+        
         while True:
+            # Check for total runtime limit
+            elapsed = time.time() - start_time
+            if elapsed > max_runtime_seconds:
+                self._emit("info", {"message": f"Max runtime limit (2 hours) reached. Elapsed: {elapsed:.1f}s. Stopping for safety."})
+                return history
+
             result = self.run_turn()
             history.append(result)
-            if result["event"] in {"completed", "max_turns_reached"}:
+            if result["event"] in {"completed", "max_turns_reached", "fatal_environment_error"}:
                 return history
 
     def _load_or_create_state(self) -> SessionState:
+        if self._state is not None:
+            return self._state
+
         if self.config.state_path.exists():
-            return SessionState.load(self.config.state_path)
+            state = SessionState.load(self.config.state_path)
+            # Reset counters for a fresh start in this execution, but keep the summaries.
+            state.session_id = 1
+            state.session_turn = 0
+            state.total_turns = 0
+            state.status = "running"
+            state.current_progress_path = self._progress_path_for_session(state.session_id)
+            state.save(self.config.state_path)
+            self._state = state
+            return state
 
         state = SessionState.initial(
             session_id=1,
@@ -217,6 +243,7 @@ class AutoDevOrchestrator:
         )
         self._write_text(state.current_progress_path, self._default_progress_markdown())
         state.save(self.config.state_path)
+        self._state = state
         return state
 
     def _default_progress_markdown(self) -> str:
@@ -294,23 +321,54 @@ class AutoDevOrchestrator:
         self._write_text(self.config.requirement_doc_path, content)
 
     def _run_codex_with_retry(self, prompt: str) -> CodexResult:
-        result = self.codex_runner.run(prompt, cwd=self.config.workspace)
-        self._emit_result("codex_attempt_1", prompt, result)
-        if result.exit_code == 0:
-            return result
-        if self._is_fatal_environment_error(result):
-            return result
+        # If we already know Codex is limited in this session, skip straight to fallback
+        if not self._use_fallback_directly:
+            result = self.codex_runner.run(prompt, cwd=self.config.workspace)
+            self._emit_result("codex_attempt_1", prompt, result)
+            
+            if result.exit_code == 0:
+                return result
+                
+            if self._is_usage_limit(result):
+                self._use_fallback_directly = True
+                self._emit("info", {"message": "Codex usage limit reached. Switching to fallback mode for this session."})
+            elif not self._is_fatal_environment_error(result):
+                # Try a retry if it's not a fatal/limit error
+                retry_prompt = (
+                    f"{prompt}\n\n"
+                    "The previous Codex execution failed. "
+                    f"Retry once and focus on completing the same task. Error: {result.stderr.strip() or 'unknown error'}"
+                )
+                retry_result = self.codex_runner.run(retry_prompt, cwd=self.config.workspace)
+                self._emit_result("codex_attempt_2", retry_prompt, retry_result)
+                
+                if retry_result.exit_code == 0:
+                    return retry_result
+                
+                if self._is_usage_limit(retry_result):
+                    self._use_fallback_directly = True
+                    self._emit("info", {"message": "Codex usage limit reached on retry. Switching to fallback mode."})
+                else:
+                    return retry_result
 
-        retry_prompt = (
-            f"{prompt}\n\n"
-            "The previous Codex execution failed. "
-            f"Retry once and focus on completing the same task. Error: {result.stderr.strip() or 'unknown error'}"
-        )
-        retry_result = self.codex_runner.run(retry_prompt, cwd=self.config.workspace)
-        self._emit_result("codex_attempt_2", retry_prompt, retry_result)
-        if retry_result.exit_code == 0:
-            return retry_result
-        return retry_result
+        # FALLBACK CHAIN: Gemini -> Qwen
+        self._emit("info", {"message": "Attempting Gemini fallback."})
+        gemini_result = self.gemini_runner.run(prompt, cwd=self.config.workspace)
+        self._emit_result("gemini_fallback", prompt, gemini_result)
+        
+        if gemini_result.exit_code == 0:
+            return gemini_result
+            
+        # If Gemini fails, definitely try Qwen
+        self._emit("info", {"message": f"Gemini failed (code {gemini_result.exit_code}). Attempting Qwen fallback."})
+        qwen_result = self.qwen_runner.run(prompt, cwd=self.config.workspace)
+        self._emit_result("qwen_fallback", prompt, qwen_result)
+        return qwen_result
+
+    def _is_usage_limit(self, result: CodexResult) -> bool:
+        output = (result.stdout or "") + (result.stderr or "")
+        markers = ["usage limit", "Upgrade to Pro"]
+        return any(marker in output for marker in markers)
 
     def _emit_result(self, event_type: str, prompt: str, result: CodexResult) -> None:
         self._emit(
@@ -331,13 +389,18 @@ class AutoDevOrchestrator:
     def _is_fatal_environment_error(self, result: CodexResult) -> bool:
         if result.exit_code == 0:
             return False
-        stderr = result.stderr or ""
+        output = (result.stdout or "") + (result.stderr or "")
         fatal_markers = [
             "Not inside a trusted directory",
             "No such file or directory",
             "Permission denied",
+            "usage limit",
+            "Upgrade to Pro",
+            "Unauthorized",
+            "API call failed",
+            "fallback failed",
         ]
-        return any(marker in stderr for marker in fatal_markers)
+        return any(marker in output for marker in fatal_markers)
 
     def _handle_fatal_codex_error(
         self,
